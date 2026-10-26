@@ -1041,12 +1041,26 @@ pub(crate) async fn step_velocity_integral_with_trace<B: CommissioningBackend>(
                 Ok(value) => value,
                 Err(_) => return integral_fault_terminal(phase, CommissionError::Spi, None),
             };
+            // The sweep's strokes step the velocity target from rest, and the
+            // first few milliseconds of that step overshoot by the measurement
+            // lag of a torque-saturated loop, independent of the planned
+            // amplitude. Fence the sweep by the plan's effective ceiling, as the
+            // campaign that nominated its fixed P was, never by less than the
+            // proportional envelope of the planned velocity.
+            let effective_ceiling_mrev_s = super::sweep_plan::effective_velocity_ceiling_mrev_s(
+                safety.budget.machine_velocity_ceiling_mrev_s,
+                counts_per_rev,
+            );
             if safety
                 .configure_integral_encoder_resolution(counts_per_rev)
                 .and_then(|_| safety.set_encoder_baseline(encoder_raw))
                 .is_err()
+                || effective_ceiling_mrev_s.is_err()
                 || safety
-                    .configure_velocity_envelope(plan.planned_velocity_mrev_s)
+                    .configure_velocity_envelope_up_to_ceiling(
+                        plan.planned_velocity_mrev_s,
+                        effective_ceiling_mrev_s.unwrap_or(0),
+                    )
                     .is_err()
             {
                 return integral_fault_terminal(phase, CommissionError::EncoderFault, None);

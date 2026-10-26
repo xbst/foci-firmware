@@ -568,13 +568,19 @@ impl CommissioningEngine {
 
     /// Create a reversal-standstill robustness engine from a preflighted point.
     ///
+    /// The gate's step reversals overshoot by roughly the torque limit over the
+    /// velocity P gain, which is independent of the leg amplitude, so its
+    /// safety envelope widens to the plan's effective ceiling, exactly like the
+    /// breakaway campaign's; the gate's own reconvergence, residual, and IAE
+    /// thresholds judge the overshoot.
+    ///
     /// # Errors
     ///
     /// Returns [`CommissionError::EncoderFault`] for an invalid encoder domain,
-    /// [`CommissionError::InvalidSchedule`] when the probe velocity is zero or
-    /// its rpm-to-mrev/s conversion overflows, and
-    /// [`CommissionError::TargetRateInvalid`] when the envelope's
-    /// proportional-margin arithmetic overflows.
+    /// [`CommissionError::InvalidSchedule`] when the probe velocity is zero,
+    /// its rpm-to-mrev/s conversion overflows, or the encoder-observable
+    /// ceiling cannot be derived, and [`CommissionError::TargetRateInvalid`]
+    /// when the envelope's proportional-margin arithmetic overflows.
     pub(crate) fn new_outer_for_tmc_with_robustness(
         oid: u8,
         tmc_state: &'static TmcChannelState,
@@ -605,9 +611,16 @@ impl CommissioningEngine {
             .checked_mul(1_000)
             .map(|value| value / 60)
             .ok_or(CommissionError::InvalidSchedule)?;
-        scaffold
-            .safety
-            .configure_velocity_envelope(probe_velocity_mrev_s)?;
+        let effective_ceiling_mrev_s =
+            crate::commissioning::outer::velocity::sweep_plan::effective_velocity_ceiling_mrev_s(
+                scaffold.safety.budget.machine_velocity_ceiling_mrev_s,
+                encoder_counts_per_rev,
+            )
+            .map_err(|_| CommissionError::InvalidSchedule)?;
+        scaffold.safety.configure_velocity_envelope_up_to_ceiling(
+            probe_velocity_mrev_s,
+            effective_ceiling_mrev_s,
+        )?;
         let phase = OuterPhase::RobustnessReversal {
             state: RobustnessReversalState::Setup,
             workspace: RobustnessReversalWorkspace::new(),
@@ -2143,6 +2156,56 @@ mod tests {
         });
 
         assert!(matches!(result, Err(CommissionError::CampaignPlanInvalid)));
+    }
+
+    #[fixture_test]
+    fn robustness_safety_envelope_widens_to_the_effective_ceiling() {
+        use crate::commission_dispatch::robustness::RobustnessPreflight;
+        use crate::commissioning::outer::velocity::integral_reproduction::{
+            AcceptancePoint, IntegralPlanIdentity,
+        };
+
+        let point = AcceptancePoint {
+            identity: IntegralPlanIdentity {
+                channel: 0,
+                build_features: 0x1234,
+                schema_revision: 1,
+                plan_digest: 0xfeed_beef,
+            },
+            selected_p: 1_416,
+            selected_i: 362,
+            target_velocity_rpm: 322,
+            selected_response_intervals_q: [[10, 20], [-20, -10]],
+            confidence_q: 0,
+            band_position_q: 0,
+            qualifier_bits: 0,
+            token: None,
+        };
+        let engine = CommissioningEngine::new_outer_for_tmc_with_robustness(
+            0,
+            tmc_state(),
+            sample_outer_params(),
+            sample_entry_snapshot(),
+            RobustnessPreflight {
+                point,
+                run_sequence: 7,
+            },
+            4_000,
+        )
+        .expect("valid robustness safety configuration");
+
+        let EngineMode::Outer {
+            phase: OuterPhase::RobustnessReversal { safety, .. },
+            ..
+        } = &engine.engine_mode
+        else {
+            panic!("expected a robustness reversal engine");
+        };
+        // 322 rpm plans 5_366 mrev/s, whose proportional envelope is 8_049 mrev/s.
+        // The gate is bounded by the effective ceiling instead: the 10_000 mrev/s
+        // machine ceiling of `sample_outer_params`, below the 12_487 mrev/s a
+        // 4_000-count encoder can observe, i.e. 40_000_000 milli-counts/s.
+        assert_eq!(safety.active_velocity_cap_milli_counts_per_s(), 40_000_000);
     }
 
     #[fixture_test]

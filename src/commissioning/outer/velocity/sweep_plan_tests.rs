@@ -8,9 +8,9 @@ use super::{
     OBSERVATIONS_PER_DIRECTION_PER_RUNG, PROPORTIONAL_PLAN_SCHEMA_REVISION,
     RequestedVelocitySource, SETTLE_ANALYSIS_BUDGET_US, SWEEP_SLOT_COUNT, StrokeGeometry,
     VelocityPlanError, VelocitySweepRequest, ZERO_SETTLE_US, build_gain_ladder,
-    build_gain_ladder_generic, cap_safe_target_rpm, current_gain_span, envelope_cap, gain_at,
-    half_octave_candidate, plan_proportional_velocity_sweep, plan_velocity_sweep,
-    representability_ceilings, travel_cap,
+    build_gain_ladder_generic, cap_safe_target_rpm, current_gain_span,
+    effective_velocity_ceiling_mrev_s, envelope_cap, gain_at, half_octave_candidate,
+    plan_proportional_velocity_sweep, plan_velocity_sweep, representability_ceilings, travel_cap,
 };
 use crate::autotune::TmcMechanicalRpm;
 use foci_tmc4671::pid::{PidIGain, PidPGain};
@@ -225,6 +225,16 @@ fn every_firmware_representability_term_is_enumerated() {
     let limits = representability_ceilings(4_000).unwrap();
     assert_eq!(limits.encoder_observable_mrev_s, 12_487);
     assert!(TmcMechanicalRpm::from_mrev_s_nearest(u32::MAX).is_ok());
+}
+
+#[test]
+fn effective_velocity_ceiling_is_the_lower_of_machine_and_encoder_bounds() {
+    assert_eq!(effective_velocity_ceiling_mrev_s(10_000, 4_000), Ok(10_000));
+    assert_eq!(effective_velocity_ceiling_mrev_s(20_000, 4_000), Ok(12_487));
+    assert_eq!(
+        effective_velocity_ceiling_mrev_s(10_000, 0),
+        Err(VelocityPlanError::InvalidRequest)
+    );
 }
 
 #[test]

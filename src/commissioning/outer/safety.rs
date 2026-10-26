@@ -411,6 +411,32 @@ impl OuterSafetyLimits {
         Ok(())
     }
 
+    /// Configure the runtime envelope for a verification primitive whose legs
+    /// may legitimately overshoot: the motor is bounded by the plan's effective
+    /// ceiling, `min(host machine ceiling, encoder-observable)`, whenever that
+    /// ceiling is wider than the proportional envelope of the planned velocity.
+    ///
+    /// The bound never drops below [`Self::configure_velocity_envelope`]'s, so
+    /// a ceiling of zero (or one below the proportional envelope) keeps that
+    /// envelope; the stroke and its zero-target settle share the bound.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CommissionError::InvalidSchedule`] when
+    /// `planned_velocity_mrev_s` is zero and
+    /// [`CommissionError::TargetRateInvalid`] when the envelope's
+    /// proportional-margin arithmetic overflows.
+    pub(crate) fn configure_velocity_envelope_up_to_ceiling(
+        &mut self,
+        planned_velocity_mrev_s: u32,
+        effective_ceiling_mrev_s: u32,
+    ) -> Result<(), CommissionError> {
+        let envelope_mrev_s =
+            Self::envelope_mrev_s(planned_velocity_mrev_s)?.max(effective_ceiling_mrev_s);
+        self.apply_velocity_envelope(envelope_mrev_s, envelope_mrev_s);
+        Ok(())
+    }
+
     /// Mark the active primitive as past its zero-target boundary.
     pub(crate) const fn enter_settle_phase(&mut self) {
         self.in_settle_phase = true;
@@ -2095,6 +2121,49 @@ mod tests {
             .configure_velocity_envelope_with_settle_ceiling(1_000_000, 1)
             .unwrap_err();
         assert_eq!(error, CommissionError::VelocityEnvelopeExceedsCeiling);
+    }
+
+    #[test]
+    fn configure_velocity_envelope_up_to_ceiling_widens_to_the_effective_ceiling() {
+        let mut safety = armed_safety(Some(100_000), 101_000);
+        safety
+            .configure_velocity_envelope_up_to_ceiling(5_366, 12_500)
+            .expect("a ceiling above the proportional envelope is accepted");
+        // 12_500 mrev/s at 4_000 counts/rev is 50_000_000 milli-counts/s, for the
+        // stroke and for its zero-target settle alike.
+        assert_eq!(safety.active_velocity_cap_milli_counts_per_s(), 50_000_000);
+        safety.enter_settle_phase();
+        assert_eq!(safety.active_velocity_cap_milli_counts_per_s(), 50_000_000);
+    }
+
+    #[test]
+    fn configure_velocity_envelope_up_to_ceiling_never_drops_below_the_proportional_envelope() {
+        let mut safety = armed_safety(Some(100_000), 101_000);
+        // max(ceil(5_366 * 3 / 2), 5_366 + 2_000) = 8_049 mrev/s at 4_000 counts/rev.
+        let proportional_envelope_milli_counts_per_s = 8_049 * 4_000;
+        safety
+            .configure_velocity_envelope_up_to_ceiling(5_366, 0)
+            .expect("a zero ceiling keeps the proportional envelope");
+        assert_eq!(
+            safety.active_velocity_cap_milli_counts_per_s(),
+            proportional_envelope_milli_counts_per_s
+        );
+        safety
+            .configure_velocity_envelope_up_to_ceiling(5_366, 8_000)
+            .expect("a ceiling below the proportional envelope keeps it");
+        assert_eq!(
+            safety.active_velocity_cap_milli_counts_per_s(),
+            proportional_envelope_milli_counts_per_s
+        );
+    }
+
+    #[test]
+    fn configure_velocity_envelope_up_to_ceiling_rejects_zero_planned_velocity() {
+        let mut safety = OuterSafetyLimits::new(100, OuterMotionBudget::firmware_caps());
+        assert_eq!(
+            safety.configure_velocity_envelope_up_to_ceiling(0, 10_000),
+            Err(CommissionError::InvalidSchedule)
+        );
     }
 
     #[test]

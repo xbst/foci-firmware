@@ -1945,6 +1945,28 @@ fn seed_sufficient_curve(data: &mut VelocityIntegralRuntime, workspace: &mut Tra
 }
 
 #[test]
+fn setup_arms_the_safety_envelope_at_the_effective_ceiling() {
+    let mut phase = phase();
+    let mut workspace = TransientBuffer::new();
+    let mut backend = MockBackend::new();
+    backend.current_limit_value = current_limit(2_816);
+
+    assert!(matches!(
+        step(&mut phase, &mut workspace, &mut backend),
+        StepResult::ReadyNow
+    ));
+
+    let OuterPhase::VelocityIntegral { safety, .. } = &phase else {
+        panic!("expected the integral phase");
+    };
+    // The plan's 2_929 mrev/s has a proportional envelope of 4_929 mrev/s; the
+    // sweep is fenced by the budget's 10_000 mrev/s machine ceiling instead
+    // (below the 12_487 mrev/s a 4_000-count encoder can observe), i.e.
+    // 40_000_000 milli-counts/s.
+    assert_eq!(safety.active_velocity_cap_milli_counts_per_s(), 40_000_000);
+}
+
+#[test]
 fn setup_and_first_command_preserve_plan_before_motion_and_clear_integrator() {
     let mut phase = phase();
     let mut workspace = TransientBuffer::new();

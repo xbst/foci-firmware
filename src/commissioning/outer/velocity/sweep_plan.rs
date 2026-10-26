@@ -707,6 +707,23 @@ fn representability_ceilings(
     })
 }
 
+/// Resolve the effective velocity ceiling that bounds every outer velocity
+/// primitive: the lower of the host machine ceiling and the velocity the outer
+/// safety sampler can observe without a quarter-turn fault.
+///
+/// # Errors
+///
+/// Returns [`VelocityPlanError::InvalidRequest`] when `encoder_counts_per_rev`
+/// is zero and [`VelocityPlanError::Arithmetic`] when the encoder-observable
+/// bound overflows.
+pub(crate) fn effective_velocity_ceiling_mrev_s(
+    machine_velocity_ceiling_mrev_s: u32,
+    encoder_counts_per_rev: u32,
+) -> Result<u32, VelocityPlanError> {
+    let ceilings = representability_ceilings(encoder_counts_per_rev)?;
+    Ok(machine_velocity_ceiling_mrev_s.min(ceilings.encoder_observable_mrev_s))
+}
+
 /// Resolve the current-representable `(p_start, p_top)` gain span and the
 /// derived usable torque limit from the requested target and hard torque limit.
 ///

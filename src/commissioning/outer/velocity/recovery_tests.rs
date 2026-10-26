@@ -985,6 +985,49 @@ fn recovery_current_observer_covers_motion_and_zero_target_settle() {
 }
 
 #[test]
+fn recovery_limiter_contact_at_the_moving_boundary_is_contained_as_current_headroom() {
+    // Both current-loop integrators saturated during the return stroke.
+    const CURRENT_LOOP_ERRSUM_LIMITS: u32 = (1 << 10) | (1 << 14);
+    const STEP_COUNTS: i32 = 20;
+
+    let mut fixture = RecoveryFixture::new(1_040, Some(14_000_000));
+    fixture.command_motion();
+    let _ = fixture.backend.registers.insert(
+        foci_tmc4671::registers::STATUS_FLAGS.addr(),
+        CURRENT_LOOP_ERRSUM_LIMITS,
+    );
+
+    let target = moving_arrival_counts();
+    let mut magnitude = 1_040_i32;
+    let mut elapsed_us = 0;
+    loop {
+        magnitude = (magnitude - STEP_COUNTS).max(target);
+        elapsed_us += 1_000;
+        match fixture.sample(elapsed_us, magnitude) {
+            RungOriginRecoveryStep::At(_) => assert!(
+                magnitude > target,
+                "the moving phase must reach its boundary once the target is reached"
+            ),
+            RungOriginRecoveryStep::Contained(report) => {
+                assert_eq!(
+                    report.outcome,
+                    RungOriginRecoveryOutcome::RecoveryCurrentHeadroom
+                );
+                assert_eq!(
+                    report.binding_source,
+                    RecoveryBindingSource::CurrentHeadroom
+                );
+                return;
+            }
+            other => panic!(
+                "limiter contact at the moving boundary must be contained as current headroom, \
+                 got {other:?}"
+            ),
+        }
+    }
+}
+
+#[test]
 fn recovery_contact_passive_settle_proves_an_in_band_origin() {
     let mut fixture = RecoveryFixture::new_with_policy(
         1_040,

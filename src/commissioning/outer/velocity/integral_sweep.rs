@@ -262,9 +262,8 @@ fn current_guard_error(error: VelocityCurrentGuardError) -> CommissionError {
     match error {
         VelocityCurrentGuardError::RegisterIo => CommissionError::Spi,
         VelocityCurrentGuardError::InvalidLimit
-        | VelocityCurrentGuardError::ActionableStatus(_) => {
-            CommissionError::SafetyEnvelopeViolation
-        }
+        | VelocityCurrentGuardError::ActionableStatus(_)
+        | VelocityCurrentGuardError::LimiterContact(_) => CommissionError::SafetyEnvelopeViolation,
     }
 }
 

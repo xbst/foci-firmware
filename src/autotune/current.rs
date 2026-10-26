@@ -102,6 +102,38 @@ pub const fn current_loop_entry_actionable_status_mask(
     current_loop_actionable_status_mask(feedback_config) & !CURRENT_AXIS_ENTRY_DEMOTED_STATUS_MASK
 }
 
+/// Limiter bits: the current-axis PI target and error-sum clamps, the inverse
+/// Park circular limiter, and PWM duty at either rail. Reference-switch bits are
+/// deliberately excluded; a switch closing mid-stroke is a motion event, not
+/// limiter activity.
+const CURRENT_AXIS_LIMITER_STATUS_MASK: u32 = foci_tmc4671::registers::StatusFlags::new()
+    .with_pid_id_target_limit(true)
+    .with_pid_id_errsum_limit(true)
+    .with_pid_iq_target_limit(true)
+    .with_pid_iq_errsum_limit(true)
+    .with_ipark_cirlim_limit_u_d(true)
+    .with_ipark_cirlim_limit_u_q(true)
+    .with_ipark_cirlim_limit_u_r(true)
+    .with_pwm_min(true)
+    .with_pwm_max(true)
+    .into_bits();
+
+const _: () = assert!(
+    CURRENT_AXIS_LIMITER_STATUS_MASK & !CURRENT_AXIS_ENTRY_DEMOTED_STATUS_MASK == 0,
+    "limiter bits must be a subset of the entry-demoted bits"
+);
+
+/// Status bits a velocity stroke legitimately leaves set when it drives the
+/// current loops or the voltage output into a configured limit.
+///
+/// A subset of the entry-demoted bits. Velocity-campaign phase boundaries
+/// classify a status word made only of these bits as limiter contact (the axis
+/// reached its current or voltage authority at that gain) instead of the
+/// fail-closed consequence that genuine fault bits keep.
+pub const fn current_loop_limiter_status_mask() -> u32 {
+    CURRENT_AXIS_LIMITER_STATUS_MASK
+}
+
 /// Whether `flags` contains a bit that `mask` marks actionable.
 pub const fn is_actionable_status(flags: u32, mask: u32) -> bool {
     flags & mask != 0

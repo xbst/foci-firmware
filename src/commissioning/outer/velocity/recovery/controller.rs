@@ -278,11 +278,19 @@ pub(crate) async fn step_rung_origin_recovery<B: CommissioningBackend>(
                     return recovery_fault(CommissionError::Spi, None);
                 }
                 resources.safety.enter_settle_phase();
-                if let Err(error) = current_result {
-                    return current_guard_fault(runtime, resources, backend, error);
-                }
-                if recovery_current_contact(resources.current_observer)
-                    && !runtime.current_contact_detected()
+                let limiter_contact = match current_result {
+                    Ok(()) => false,
+                    Err(VelocityCurrentGuardError::LimiterContact(status)) => {
+                        defmt::warn!(
+                            "recovery moving boundary limiter contact: status={:#x}",
+                            status
+                        );
+                        true
+                    }
+                    Err(error) => return current_guard_fault(runtime, resources, backend, error),
+                };
+                if (limiter_contact || recovery_current_contact(resources.current_observer))
+                    &&!runtime.current_contact_detected()
                 {
                     return recovery_current_headroom(runtime, resources, backend).await;
                 }
@@ -475,14 +483,22 @@ pub(crate) async fn step_rung_origin_recovery<B: CommissioningBackend>(
                 Err(error) => return recovery_fault(error, None),
             };
             checkpoint(BreakawayCheckpoint::RecoveryZeroBoundary);
-            if let Err(error) =
-                finish_velocity_current_zero_phase(resources.current_observer, backend).await
-            {
-                return current_guard_fault(runtime, resources, backend, error);
-            }
+            let limiter_contact =
+                match finish_velocity_current_zero_phase(resources.current_observer, backend).await
+                {
+                    Ok(()) => false,
+                    Err(VelocityCurrentGuardError::LimiterContact(status)) => {
+                        defmt::warn!(
+                            "recovery zero boundary limiter contact: status={:#x}",
+                            status
+                        );
+                        true
+                    }
+                    Err(error) => return current_guard_fault(runtime, resources, backend, error),
+                };
             let current_contact = if runtime.current_contact_detected() {
                 true
-            } else if recovery_current_contact(resources.current_observer) {
+            } else if limiter_contact || recovery_current_contact(resources.current_observer) {
                 if let Some(fault) = hold_zero_for_current_contact(resources.safety, backend).await
                 {
                     return fault;
@@ -684,7 +700,8 @@ fn current_guard_fault<B: CommissioningBackend>(
     match error {
         VelocityCurrentGuardError::RegisterIo => recovery_fault(CommissionError::Spi, None),
         VelocityCurrentGuardError::InvalidLimit
-        | VelocityCurrentGuardError::ActionableStatus(_) => {
+        | VelocityCurrentGuardError::ActionableStatus(_)
+        | VelocityCurrentGuardError::LimiterContact(_) => {
             current_limit_fault(runtime, resources, backend)
         }
     }

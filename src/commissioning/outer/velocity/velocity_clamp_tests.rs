@@ -6,7 +6,8 @@ use super::velocity_clamp::{
     PhaseObservation, VelocityCurrentClampSession, VelocityCurrentContact,
     VelocityCurrentGuardError, VelocityCurrentObserver, VelocityCurrentZeroPhase,
     VelocityLimitEvidenceCapability, begin_velocity_current_primitive, classify_phase_evidence,
-    derive_probe_limit, finish_velocity_current_moving_phase, restart_velocity_current_primitive,
+    derive_probe_limit, finish_velocity_current_moving_phase, finish_velocity_current_zero_phase,
+    restart_velocity_current_primitive,
 };
 use crate::commission_dispatch::test_support::{
     MockBackend, SpiOp, breakaway_confirmation_for_test,
@@ -683,8 +684,28 @@ fn restart_faults_on_genuine_fault_bit() {
 }
 
 #[test]
-fn finish_moving_still_faults_on_demoted_bit_set_during_stroke() {
-    for bit in [8u32, 10, 12, 14, 16, 17, 18, 20, 21, 22, 24, 25] {
+fn finish_moving_reports_limiter_contact_for_limiter_bits_set_during_stroke() {
+    for bit in [8u32, 10, 12, 14, 16, 17, 18, 24, 25] {
+        let mut backend = MockBackend::new();
+        let _ = backend.registers.insert(STATUS_FLAGS.addr(), 1 << bit);
+        let mut observer = VelocityCurrentObserver::new(
+            PidTorqueFluxLimit::new(2_534).unwrap(),
+            VelocityLimitEvidenceCapability::BestEffortPolling,
+        );
+        let r = pollster::block_on(finish_velocity_current_moving_phase(
+            &mut observer,
+            &mut backend,
+        ));
+        assert!(
+            matches!(r, Err(VelocityCurrentGuardError::LimiterContact(s)) if s == (1 << bit)),
+            "finish_moving must report limiter contact on bit {bit} set during the stroke: {r:?}"
+        );
+    }
+}
+
+#[test]
+fn finish_moving_still_faults_on_reference_switch_bits_set_during_stroke() {
+    for bit in [20u32, 21, 22] {
         let mut backend = MockBackend::new();
         let _ = backend.registers.insert(STATUS_FLAGS.addr(), 1 << bit);
         let mut observer = VelocityCurrentObserver::new(
@@ -697,7 +718,53 @@ fn finish_moving_still_faults_on_demoted_bit_set_during_stroke() {
         ));
         assert!(
             matches!(r, Err(VelocityCurrentGuardError::ActionableStatus(s)) if s == (1 << bit)),
-            "finish_moving must fault on bit {bit} set during the stroke"
+            "finish_moving must fault on reference switch bit {bit} set during the stroke"
         );
     }
+}
+
+#[test]
+fn finish_moving_keeps_the_fail_closed_consequence_when_a_fault_bit_joins_limiter_bits() {
+    const ERRSUM_LIMITS: u32 = (1 << 10) | (1 << 14);
+    let mut backend = MockBackend::new();
+    let _ = backend
+        .registers
+        .insert(STATUS_FLAGS.addr(), ERRSUM_LIMITS | ADC_I_CLIPPED_BIT);
+    let mut observer = VelocityCurrentObserver::new(
+        PidTorqueFluxLimit::new(2_534).unwrap(),
+        VelocityLimitEvidenceCapability::BestEffortPolling,
+    );
+    let r = pollster::block_on(finish_velocity_current_moving_phase(
+        &mut observer,
+        &mut backend,
+    ));
+    assert!(
+        matches!(
+            r,
+            Err(VelocityCurrentGuardError::ActionableStatus(s))
+                if s == ERRSUM_LIMITS | ADC_I_CLIPPED_BIT
+        ),
+        "a genuine fault bit must keep the whole word fail-closed: {r:?}"
+    );
+}
+
+#[test]
+fn finish_zero_reports_limiter_contact_for_current_loop_errsum_limits() {
+    // The word a TMC4671 leaves behind when a high-gain velocity stroke saturates
+    // both current-loop integrators: pid_id_errsum_limit and pid_iq_errsum_limit.
+    const ERRSUM_LIMITS: u32 = (1 << 10) | (1 << 14);
+    let mut backend = MockBackend::new();
+    let _ = backend.registers.insert(STATUS_FLAGS.addr(), ERRSUM_LIMITS);
+    let mut observer = VelocityCurrentObserver::new(
+        PidTorqueFluxLimit::new(2_534).unwrap(),
+        VelocityLimitEvidenceCapability::BestEffortPolling,
+    );
+    let r = pollster::block_on(finish_velocity_current_zero_phase(
+        &mut observer,
+        &mut backend,
+    ));
+    assert!(
+        matches!(r, Err(VelocityCurrentGuardError::LimiterContact(s)) if s == ERRSUM_LIMITS),
+        "finish_zero must report limiter contact for errsum limits: {r:?}"
+    );
 }

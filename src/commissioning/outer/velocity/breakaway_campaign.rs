@@ -267,6 +267,13 @@ fn current_guard_fault(error: VelocityCurrentGuardError) -> BreakawayProbeStep {
             defmt::warn!("probe current guard actionable status: {:#x}", status);
             CommissionError::SafetyEnvelopeViolation
         }
+        // The probe climbs from the smallest representable gain; limiter contact
+        // there means the axis cannot follow even the gentlest stroke, which is
+        // still a fault rather than a reached authority ceiling.
+        VelocityCurrentGuardError::LimiterContact(status) => {
+            defmt::warn!("probe current guard limiter contact: {:#x}", status);
+            CommissionError::SafetyEnvelopeViolation
+        }
     })
 }
 
@@ -1377,8 +1384,25 @@ fn discovery_current_guard_fault(error: VelocityCurrentGuardError) -> AdditiveDi
     discovery_fault(match error {
         VelocityCurrentGuardError::InvalidLimit => CommissionError::InvalidCurrentLimit,
         VelocityCurrentGuardError::RegisterIo => CommissionError::Spi,
-        VelocityCurrentGuardError::ActionableStatus(_) => CommissionError::SafetyEnvelopeViolation,
+        VelocityCurrentGuardError::ActionableStatus(_)
+        | VelocityCurrentGuardError::LimiterContact(_) => CommissionError::SafetyEnvelopeViolation,
     })
+}
+
+/// Record limiter contact observed at a discovery phase boundary.
+///
+/// The stroke drove the current loops or the voltage output into a configured
+/// limit at this rung, so the ladder has reached its current authority. Finish
+/// this rung's bookkeeping, then stop climbing and route the walk through the
+/// current-headroom terminus so every in-band rung already collected is kept,
+/// instead of discarding the campaign as an internal fault.
+fn note_discovery_limiter_contact(session: &mut AdditiveDiscoverySession, status: u32) {
+    defmt::warn!(
+        "discovery rung={} limiter contact: status={:#x}, ending the ladder on current authority",
+        session.rung_index,
+        status,
+    );
+    session.pending_headroom_stop = true;
 }
 
 fn discovery_step_from_probe_fault(step: BreakawayProbeStep) -> AdditiveDiscoveryStep {
@@ -1649,8 +1673,12 @@ pub(crate) async fn step_additive_discovery<B: CommissioningBackend>(
                 return discovery_fault(CommissionError::Spi);
             }
             safety.enter_settle_phase();
-            if let Err(error) = boundary {
-                return discovery_current_guard_fault(error);
+            match boundary {
+                Ok(()) => {}
+                Err(VelocityCurrentGuardError::LimiterContact(status)) => {
+                    note_discovery_limiter_contact(session, status);
+                }
+                Err(error) => return discovery_current_guard_fault(error),
             }
             if clear_velocity_error_sum(backend).await.is_err() {
                 return discovery_fault(CommissionError::Spi);
@@ -1889,10 +1917,13 @@ pub(crate) async fn step_additive_discovery<B: CommissioningBackend>(
                 Ok(ScoredRestPoll::Complete(confirmation)) => confirmation,
                 Err(error) => return discovery_fault(error),
             };
-            if let Err(error) =
-                finish_velocity_current_zero_phase(&mut workspace.current_observer, backend).await
+            match finish_velocity_current_zero_phase(&mut workspace.current_observer, backend).await
             {
-                return discovery_current_guard_fault(error);
+                Ok(()) => {}
+                Err(VelocityCurrentGuardError::LimiterContact(status)) => {
+                    note_discovery_limiter_contact(session, status);
+                }
+                Err(error) => return discovery_current_guard_fault(error),
             }
             if workspace
                 .current_observer
@@ -2433,11 +2464,28 @@ fn confirmation_safety_fault(
 }
 
 fn confirmation_current_guard_fault(error: VelocityCurrentGuardError) -> BandConfirmationStep {
-    confirmation_fault(match error {
-        VelocityCurrentGuardError::InvalidLimit => CommissionError::InvalidCurrentLimit,
-        VelocityCurrentGuardError::RegisterIo => CommissionError::Spi,
-        VelocityCurrentGuardError::ActionableStatus(_) => CommissionError::SafetyEnvelopeViolation,
-    })
+    match error {
+        VelocityCurrentGuardError::InvalidLimit => {
+            confirmation_fault(CommissionError::InvalidCurrentLimit)
+        }
+        VelocityCurrentGuardError::RegisterIo => confirmation_fault(CommissionError::Spi),
+        VelocityCurrentGuardError::ActionableStatus(_) => {
+            confirmation_fault(CommissionError::SafetyEnvelopeViolation)
+        }
+        // A held-out stroke that drives the current loops or the voltage output
+        // into a limit cannot confirm the band at the nominated gain. Report the
+        // same current-authority verdict a headroom-excluded observation would,
+        // so the campaign ends inconclusive instead of as an internal fault.
+        VelocityCurrentGuardError::LimiterContact(status) => {
+            defmt::warn!(
+                "confirmation limiter contact: status={:#x}, ending on current authority",
+                status,
+            );
+            BandConfirmationStep::Done(BandConfirmationOutcome::TargetBandConfirmationInconclusive(
+                super::band_confirmation::BandConfirmationFailureCause::CurrentAuthority,
+            ))
+        }
+    }
 }
 
 fn confirmation_step_from_probe_fault(step: BreakawayProbeStep) -> BandConfirmationStep {

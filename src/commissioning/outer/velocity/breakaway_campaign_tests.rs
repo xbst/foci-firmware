@@ -1450,6 +1450,125 @@ fn current_headroom_after_an_in_band_rung_retains_the_candidate() {
     assert_eq!(collected.as_slice()[0].p.raw(), 362);
 }
 
+/// The status word a TMC4671 leaves behind when a high-gain velocity stroke
+/// saturates both current-loop integrators: `pid_id_errsum_limit` and
+/// `pid_iq_errsum_limit`, as observed on a 48 V Ouroboros driving an unloaded
+/// CoreXY gantry near the top of the additive ladder.
+const CURRENT_LOOP_ERRSUM_LIMITS: u32 = (1 << 10) | (1 << 14);
+
+/// Drive discovery like [`run_discovery`], planting `status_flags` in `STATUS_FLAGS`
+/// immediately before the moving-phase boundary of `contact_rung`.
+fn run_discovery_with_boundary_status(
+    contact_rung: u8,
+    status_flags: u32,
+    mut response_numerator: impl FnMut(VelocityDirection, u8) -> i32,
+) -> (AdditiveDiscoveryOutcome, AdditiveDiscoverySession) {
+    let request = discovery_request();
+    let target_velocity_rpm = TmcMechanicalRpm::from_register(100);
+    let mut session = AdditiveDiscoverySession::new(request, false, target_velocity_rpm, 4_394)
+        .expect("valid discovery session");
+    let mut workspace = BreakawayProbeWorkspace::new();
+    let mut state = AdditiveDiscoveryState::PlannedDiscovery;
+    let mut safety = test_safety();
+    let mut backend = test_backend();
+
+    let mut encoder_count: i32 = 0;
+    let mut stroke_numerator = 0_i32;
+    let mut stroke_sign = 1_i32;
+
+    for _ in 0..1_000_000 {
+        if matches!(state, AdditiveDiscoveryState::CommandTarget) {
+            stroke_numerator = response_numerator(session.direction, session.rung_index);
+            stroke_sign = direction_sign(session.direction);
+        }
+        if matches!(state, AdditiveDiscoveryState::CommandZero)
+            && session.rung_index == contact_rung
+        {
+            backend
+                .registers
+                .insert(STATUS_FLAGS.addr(), status_flags)
+                .expect("status register fixture fits");
+        }
+        let is_capture_phase = matches!(state, AdditiveDiscoveryState::Capture { .. });
+        let result = pollster::block_on(step_additive_discovery(
+            &mut state,
+            &mut workspace,
+            &mut session,
+            &mut safety,
+            &mut backend,
+        ));
+        match result {
+            AdditiveDiscoveryStep::ReadyNow
+            | AdditiveDiscoveryStep::Observation(_)
+            | AdditiveDiscoveryStep::Margin { .. }
+            | AdditiveDiscoveryStep::RestRejected(_)
+            | AdditiveDiscoveryStep::OriginMismatch(_) => {}
+            AdditiveDiscoveryStep::At(deadline) => {
+                backend.elapsed_us_value = deadline;
+                if is_capture_phase {
+                    encoder_count += stroke_sign * stroke_numerator;
+                }
+                backend.set_abn_decoder_count(encoder_count);
+            }
+            AdditiveDiscoveryStep::Done(outcome) => return (outcome, session),
+        }
+    }
+    panic!("discovery run exceeded its bounded step budget");
+}
+
+#[test]
+fn limiter_contact_at_the_moving_boundary_retains_collected_in_band_rungs() {
+    let (outcome, session) = run_discovery_with_boundary_status(
+        3,
+        CURRENT_LOOP_ERRSUM_LIMITS,
+        |_direction, rung_index| if rung_index == 2 { 5 } else { 2 },
+    );
+
+    let AdditiveDiscoveryOutcome::TargetBandSelected(collected) = outcome else {
+        panic!(
+            "expected TargetBandSelected (limiter contact above a safe candidate must retain it), \
+             got {outcome:?}"
+        );
+    };
+    assert_eq!(collected.count(), 1);
+    assert_eq!(collected.as_slice()[0].p.raw(), 362);
+    assert_eq!(
+        session.rung_index, 3,
+        "the ladder must stop at the rung whose stroke made limiter contact"
+    );
+}
+
+#[test]
+fn limiter_contact_before_any_in_band_rung_reports_current_headroom_before_band() {
+    let (outcome, session) = run_discovery_with_boundary_status(
+        1,
+        CURRENT_LOOP_ERRSUM_LIMITS,
+        |_direction, _rung_index| 2,
+    );
+
+    assert!(
+        matches!(outcome, AdditiveDiscoveryOutcome::CurrentHeadroomBeforeBand),
+        "limiter contact with nothing collected must end on current headroom, got {outcome:?}"
+    );
+    assert_eq!(session.rung_index, 1);
+}
+
+#[test]
+fn a_genuine_fault_bit_at_the_moving_boundary_remains_an_internal_fault() {
+    const ADC_I_CLIPPED: u32 = 1 << 26;
+    let (outcome, _session) = run_discovery_with_boundary_status(
+        3,
+        CURRENT_LOOP_ERRSUM_LIMITS | ADC_I_CLIPPED,
+        |_direction, rung_index| if rung_index == 2 { 5 } else { 2 },
+    );
+
+    let AdditiveDiscoveryOutcome::SafetyFault { error, safety } = outcome else {
+        panic!("a fault bit must keep the fail-closed consequence, got {outcome:?}");
+    };
+    assert_eq!(error, CommissionError::SafetyEnvelopeViolation);
+    assert!(safety.is_none());
+}
+
 #[test]
 fn wrong_direction_short_circuits_discovery_without_recovering() {
     let request = discovery_request();

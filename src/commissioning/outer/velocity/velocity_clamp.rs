@@ -87,6 +87,23 @@ pub(crate) enum VelocityCurrentGuardError {
     RegisterIo,
     /// A non-velocity status bit requires the existing fail-closed consequence.
     ActionableStatus(u32),
+    /// Only limiter bits were set at a phase boundary: the stroke drove the
+    /// current loops or the voltage output into a configured limit. Phases treat
+    /// this as current-authority contact at the active gain, not a fault.
+    LimiterContact(u32),
+}
+
+/// Classify the actionable status bits observed at a velocity-phase boundary.
+///
+/// A word made only of [`crate::autotune::current_loop_limiter_status_mask`]
+/// bits is [`VelocityCurrentGuardError::LimiterContact`]; any other actionable
+/// bit keeps the fail-closed [`VelocityCurrentGuardError::ActionableStatus`].
+fn boundary_status_error(actionable: u32) -> VelocityCurrentGuardError {
+    if actionable & !crate::autotune::current_loop_limiter_status_mask() == 0 {
+        VelocityCurrentGuardError::LimiterContact(actionable)
+    } else {
+        VelocityCurrentGuardError::ActionableStatus(actionable)
+    }
 }
 
 /// Derive the exact nine-tenths probe limit from the operational limit.
@@ -435,9 +452,7 @@ where
     let actionable_mask =
         crate::autotune::current_loop_actionable_status_mask(backend.feedback_config());
     if crate::autotune::is_actionable_status(flags, actionable_mask) {
-        return Err(VelocityCurrentGuardError::ActionableStatus(
-            flags & actionable_mask,
-        ));
+        return Err(boundary_status_error(flags & actionable_mask));
     }
     Ok(())
 }
@@ -458,9 +473,7 @@ where
     let actionable_mask =
         crate::autotune::current_loop_actionable_status_mask(backend.feedback_config());
     if crate::autotune::is_actionable_status(flags, actionable_mask) {
-        return Err(VelocityCurrentGuardError::ActionableStatus(
-            flags & actionable_mask,
-        ));
+        return Err(boundary_status_error(flags & actionable_mask));
     }
     Ok(())
 }

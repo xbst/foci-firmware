@@ -378,6 +378,14 @@ pub enum StepperEventReason {
     P1Stop = 5,
     ResetStepClock = 6,
     TmcDisableSignal = 7,
+    /// Diagnostic: a queue-time arm decision (`data0` = arm flags, `data1` = 1 when armed).
+    ArmDecision = 8,
+    /// Diagnostic: a P2 arm-check outcome (`data0` = arm flags, `data1` = 1 when armed).
+    ArmCheck = 9,
+    /// Diagnostic: a P2 stop-check (`data0` = arm flags before the clear).
+    StopCheck = 10,
+    /// Diagnostic: the step ISR skipped a channel that holds queued moves (`data0` = arm flags).
+    NotReadyWithMoves = 11,
 }
 
 impl StepperEventReason {
@@ -391,6 +399,10 @@ impl StepperEventReason {
             Self::P1Stop => "p1_stop",
             Self::ResetStepClock => "reset_step_clock",
             Self::TmcDisableSignal => "tmc_disable_signal",
+            Self::ArmDecision => "arm_decision",
+            Self::ArmCheck => "arm_check",
+            Self::StopCheck => "stop_check",
+            Self::NotReadyWithMoves => "not_ready_with_moves",
         }
     }
 }

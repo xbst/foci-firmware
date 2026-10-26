@@ -66,12 +66,67 @@ pub trait StepperQueueBoard: StepperTimerStateBoard {
 
     fn record_queued_segment(&mut self, _channel: u8, _steps: u32, _queue_len: usize) {}
 
+    /// Diagnostic hook: the queue-time arm decision for an admitted segment.
+    ///
+    /// `shared_flags` carries the trigger-domain bits from [`arm_flags`]; `armed` says
+    /// whether the step timer was armed for this segment.
+    fn record_arm_decision(
+        &mut self,
+        _channel: u8,
+        _shared_flags: u32,
+        _armed: bool,
+        _queue_len: usize,
+    ) {
+    }
+
     fn arm_queue_step_timer(
         &mut self,
         state: &mut TriggerDomainState,
         stepper_idx: usize,
         channel: u8,
     );
+}
+
+/// Flag bits reported in `data0` of the arm-decision diagnostic events.
+///
+/// The shared policy fills the trigger-domain bits through
+/// [`trigger_domain_arm_flags`]; the board merges its own P1-visible and TMC
+/// channel state before recording.
+pub mod arm_flags {
+    pub const MOTOR_ARMED: u32 = 1 << 0;
+    pub const TIMER_MIRROR: u32 = 1 << 1;
+    pub const TIMER_ACTIVE: u32 = 1 << 2;
+    pub const NEED_RESET: u32 = 1 << 3;
+    pub const BLOCKED_BY_TRIGGER: u32 = 1 << 4;
+    pub const ENABLE_PIN: u32 = 1 << 5;
+    pub const COMMISSION_IN_FLIGHT: u32 = 1 << 6;
+    pub const CONFIG_APPLY_PENDING: u32 = 1 << 7;
+    pub const HOMING_CLAMP: u32 = 1 << 8;
+    pub const DISCARD_SILENCED: u32 = 1 << 9;
+    pub const STALL_LATCHED: u32 = 1 << 10;
+    pub const HOMING_REENTER: u32 = 1 << 11;
+    pub const HOMING_START_PENDING: u32 = 1 << 12;
+    /// `HOMING_STATE` occupies bits 16..=23.
+    pub const HOMING_STATE_SHIFT: u32 = 16;
+}
+
+/// The trigger-domain contribution to the arm-decision flags for one stepper.
+pub fn trigger_domain_arm_flags(state: &TriggerDomainState, stepper_idx: usize) -> u32 {
+    let stop = &state.stepper_stop[stepper_idx];
+    let mut flags = 0;
+    if stop.timer_active {
+        flags |= arm_flags::TIMER_ACTIVE;
+    }
+    if stop.need_reset {
+        flags |= arm_flags::NEED_RESET;
+    }
+    if stop.blocked_by_trigger {
+        flags |= arm_flags::BLOCKED_BY_TRIGGER;
+    }
+    if state.discard_silenced[stepper_idx] {
+        flags |= arm_flags::DISCARD_SILENCED;
+    }
+    flags
 }
 
 /// Board hooks needed by shared `reset_step_clock` policy.
@@ -91,6 +146,9 @@ pub trait StepperStopCheckBoard: StepperTimerStateBoard {
     fn stop_check_index(&self, channel: u8) -> Option<usize>;
 
     fn clear_step_timer(&mut self, state: &mut TriggerDomainState, stepper_idx: usize, channel: u8);
+
+    /// Diagnostic hook: a stop check is about to clear the step timer.
+    fn record_stop_check(&mut self, _channel: u8, _shared_flags: u32) {}
 }
 
 /// Board hooks needed by shared P2 arm-check policy.
@@ -102,6 +160,9 @@ pub trait StepperArmCheckBoard: StepperTimerStateBoard {
     fn queue_has_moves(&self, channel: u8) -> bool;
 
     fn arm_check_timer(&mut self, state: &mut TriggerDomainState, stepper_idx: usize, channel: u8);
+
+    /// Diagnostic hook: the outcome of an arm check.
+    fn record_arm_check(&mut self, _channel: u8, _shared_flags: u32, _armed: bool) {}
 }
 
 /// Shared command-path queue-step policy.
@@ -150,9 +211,12 @@ pub fn queue_step_move<B: StepperQueueBoard + ?Sized>(
 
     board.record_queued_segment(channel, u32::from(move_.count), queue_len);
 
-    if !state.stepper_stop[stepper_idx].timer_active && board.motor_armed(channel) {
+    let shared_flags = trigger_domain_arm_flags(state, stepper_idx);
+    let armed = !state.stepper_stop[stepper_idx].timer_active && board.motor_armed(channel);
+    if armed {
         board.arm_queue_step_timer(state, stepper_idx, channel);
     }
+    board.record_arm_decision(channel, shared_flags, armed, queue_len);
     Ok(())
 }
 
@@ -200,6 +264,7 @@ pub fn stop_check<B: StepperStopCheckBoard + ?Sized>(
     channel: u8,
 ) {
     if let Some(stepper_idx) = board.stop_check_index(channel) {
+        board.record_stop_check(channel, trigger_domain_arm_flags(state, stepper_idx));
         board.clear_step_timer(state, stepper_idx, channel);
     }
 }
@@ -213,12 +278,16 @@ pub fn arm_check<B: StepperArmCheckBoard + ?Sized>(
     let Some(stepper_idx) = board.arm_check_index(channel) else {
         return;
     };
+    let shared_flags = trigger_domain_arm_flags(state, stepper_idx);
     if !board.motor_armed(channel) || state.stepper_stop[stepper_idx].timer_active {
+        board.record_arm_check(channel, shared_flags, false);
         return;
     }
-    if board.queue_has_moves(channel) {
+    let armed = board.queue_has_moves(channel);
+    if armed {
         board.arm_check_timer(state, stepper_idx, channel);
     }
+    board.record_arm_check(channel, shared_flags, armed);
 }
 
 #[cfg(test)]

@@ -2463,6 +2463,20 @@ fn confirmation_safety_fault(
     })
 }
 
+/// Record limiter contact at a confirmation phase boundary without ending the block.
+///
+/// A held-out stroke is judged on its settled velocity evidence. A transient
+/// current-loop clamp during the torque step does not invalidate that evidence,
+/// and the velocity-output peak still decides whether the stroke counts as
+/// current headroom, so the stroke is kept and the block runs to its verdict.
+fn note_confirmation_limiter_contact(stroke_index: u8, status: u32) {
+    defmt::warn!(
+        "confirmation stroke={} limiter contact: status={:#x}, keeping the stroke",
+        stroke_index,
+        status,
+    );
+}
+
 fn confirmation_current_guard_fault(error: VelocityCurrentGuardError) -> BandConfirmationStep {
     match error {
         VelocityCurrentGuardError::InvalidLimit => {
@@ -2679,8 +2693,12 @@ pub(crate) async fn step_band_confirmation<B: CommissioningBackend>(
                 return confirmation_fault(CommissionError::Spi);
             }
             safety.enter_settle_phase();
-            if let Err(error) = boundary {
-                return confirmation_current_guard_fault(error);
+            match boundary {
+                Ok(()) => {}
+                Err(VelocityCurrentGuardError::LimiterContact(status)) => {
+                    note_confirmation_limiter_contact(session.stroke_index, status);
+                }
+                Err(error) => return confirmation_current_guard_fault(error),
             }
             if clear_velocity_error_sum(backend).await.is_err() {
                 return confirmation_fault(CommissionError::Spi);
@@ -2882,10 +2900,13 @@ pub(crate) async fn step_band_confirmation<B: CommissioningBackend>(
                 Ok(ScoredRestPoll::Complete(confirmation)) => confirmation,
                 Err(error) => return confirmation_fault(error),
             };
-            if let Err(error) =
-                finish_velocity_current_zero_phase(&mut workspace.current_observer, backend).await
+            match finish_velocity_current_zero_phase(&mut workspace.current_observer, backend).await
             {
-                return confirmation_current_guard_fault(error);
+                Ok(()) => {}
+                Err(VelocityCurrentGuardError::LimiterContact(status)) => {
+                    note_confirmation_limiter_contact(session.stroke_index, status);
+                }
+                Err(error) => return confirmation_current_guard_fault(error),
             }
             if workspace
                 .current_observer

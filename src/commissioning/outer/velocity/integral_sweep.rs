@@ -1343,8 +1343,17 @@ pub(crate) async fn step_velocity_integral_with_trace<B: CommissioningBackend>(
             {
                 return fail_integral(phase, backend, CommissionError::Spi).await;
             }
-            if let Err(error) = boundary {
-                return fail_integral(phase, backend, current_guard_error(error)).await;
+            match boundary {
+                Ok(()) => {}
+                Err(VelocityCurrentGuardError::LimiterContact(status)) => {
+                    defmt::warn!(
+                        "integral moving boundary limiter contact: status={:#x}, keeping the stroke",
+                        status
+                    );
+                }
+                Err(error) => {
+                    return fail_integral(phase, backend, current_guard_error(error)).await;
+                }
             }
             let now_us = backend.elapsed_us();
             let exit_transition_us = match transition_elapsed_us(transition_started_us, now_us) {
@@ -1625,10 +1634,17 @@ pub(crate) async fn step_velocity_integral_with_trace<B: CommissioningBackend>(
                 Ok(ScoredRestPoll::Complete(result)) => result,
                 Err(error) => return fail_integral(phase, backend, error).await,
             };
-            if let Err(error) =
-                finish_velocity_current_zero_phase(&mut data.current_observer, backend).await
-            {
-                return fail_integral(phase, backend, current_guard_error(error)).await;
+            match finish_velocity_current_zero_phase(&mut data.current_observer, backend).await {
+                Ok(()) => {}
+                Err(VelocityCurrentGuardError::LimiterContact(status)) => {
+                    defmt::warn!(
+                        "integral zero boundary limiter contact: status={:#x}, keeping the stroke",
+                        status
+                    );
+                }
+                Err(error) => {
+                    return fail_integral(phase, backend, current_guard_error(error)).await;
+                }
             }
             let current_evidence = match data
                 .current_observer
@@ -1929,10 +1945,17 @@ pub(crate) async fn step_velocity_integral_with_trace<B: CommissioningBackend>(
                 return fail_integral(phase, backend, CommissionError::InvalidSchedule).await;
             };
             boundary.cleanup_confirmed = cleanup.confirmed_rest;
-            if let Err(error) =
-                finish_velocity_current_zero_phase(&mut data.current_observer, backend).await
-            {
-                return fail_integral(phase, backend, current_guard_error(error)).await;
+            match finish_velocity_current_zero_phase(&mut data.current_observer, backend).await {
+                Ok(()) => {}
+                Err(VelocityCurrentGuardError::LimiterContact(status)) => {
+                    defmt::warn!(
+                        "integral cleanup boundary limiter contact: status={:#x}, keeping the stroke",
+                        status
+                    );
+                }
+                Err(error) => {
+                    return fail_integral(phase, backend, current_guard_error(error)).await;
+                }
             }
             let cleanup_current = match data
                 .current_observer

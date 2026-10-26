@@ -2230,6 +2230,115 @@ fn an_all_eight_contained_run_accepts_with_the_candidate_p_and_the_frozen_plan()
     );
 }
 
+/// Drive confirmation like [`run_confirmation`], planting `status_flags` in
+/// `STATUS_FLAGS` immediately before the moving-phase boundary of `contact_stroke`.
+fn run_confirmation_with_boundary_status(
+    contact_stroke: u8,
+    status_flags: u32,
+    mut response_numerator: impl FnMut(VelocityDirection, u8) -> i32,
+) -> (BandConfirmationOutcome, u32) {
+    let target_velocity_rpm = TmcMechanicalRpm::from_register(100);
+    let entry = begin_band_confirmation(
+        AdditiveDiscoveryOutcome::TargetBandSelected(confirmable_discovery_rungs(724)),
+        42,
+        target_velocity_rpm,
+        4_394,
+        u16::MAX,
+    );
+    let mut session = match entry {
+        BandConfirmationEntry::Ready(session) => session,
+        BandConfirmationEntry::Done(outcome) => {
+            panic!("expected confirmation motion to begin, got early terminal {outcome:?}")
+        }
+    };
+    let mut workspace = BreakawayProbeWorkspace::new();
+    let mut state = BandConfirmationState::PlannedConfirmation;
+    let mut safety = test_safety();
+    safety.torque_cap = 2_448;
+    let mut backend = test_backend();
+
+    let mut encoder_count: i32 = 0;
+    let mut stroke_numerator = 0_i32;
+    let mut stroke_sign = 1_i32;
+    let mut write_gain_count = 0_u32;
+
+    for _ in 0..1_000_000 {
+        if matches!(state, BandConfirmationState::WriteGain) {
+            write_gain_count += 1;
+        }
+        if matches!(state, BandConfirmationState::CommandTarget) {
+            stroke_numerator =
+                response_numerator(session.current_direction(), session.stroke_index);
+            stroke_sign = direction_sign(session.current_direction());
+        }
+        if matches!(state, BandConfirmationState::CommandZero)
+            && session.stroke_index == contact_stroke
+        {
+            backend
+                .registers
+                .insert(STATUS_FLAGS.addr(), status_flags)
+                .expect("status register fixture fits");
+        }
+        let is_capture_phase = matches!(state, BandConfirmationState::Capture { .. });
+        let result = pollster::block_on(step_band_confirmation(
+            &mut state,
+            &mut workspace,
+            &mut session,
+            &mut safety,
+            &mut backend,
+        ));
+        match result {
+            BandConfirmationStep::ReadyNow
+            | BandConfirmationStep::Observation(_)
+            | BandConfirmationStep::RestRejected(_)
+            | BandConfirmationStep::OriginMismatch(_) => {}
+            BandConfirmationStep::At(deadline) => {
+                backend.elapsed_us_value = deadline;
+                if is_capture_phase {
+                    encoder_count += stroke_sign * stroke_numerator;
+                }
+                backend.set_abn_decoder_count(encoder_count);
+            }
+            BandConfirmationStep::Done(outcome) => return (outcome, write_gain_count),
+        }
+    }
+    panic!("confirmation run exceeded its bounded step budget");
+}
+
+#[test]
+fn limiter_contact_during_a_held_out_stroke_keeps_the_stroke_and_still_accepts() {
+    let (outcome, write_gain_count) = run_confirmation_with_boundary_status(
+        2,
+        CURRENT_LOOP_ERRSUM_LIMITS,
+        |_direction, _stroke_index| 5,
+    );
+
+    let BandConfirmationOutcome::Accepted { acceptance, .. } = outcome else {
+        panic!("a transient current-loop clamp must not end confirmation, got {outcome:?}");
+    };
+    assert_eq!(acceptance.nominated_p(), gain(724));
+    assert_eq!(
+        write_gain_count, 8,
+        "all eight held-out strokes must still be driven"
+    );
+}
+
+#[test]
+fn a_genuine_fault_bit_during_a_held_out_stroke_remains_an_internal_fault() {
+    const ADC_I_CLIPPED: u32 = 1 << 26;
+    let (outcome, _write_gain_count) = run_confirmation_with_boundary_status(
+        2,
+        CURRENT_LOOP_ERRSUM_LIMITS | ADC_I_CLIPPED,
+        |_direction, _stroke_index| 5,
+    );
+
+    let BandConfirmationOutcome::SafetyFault { error, safety } = outcome else {
+        panic!("a fault bit must keep the fail-closed consequence, got {outcome:?}");
+    };
+    assert_eq!(error, CommissionError::SafetyEnvelopeViolation);
+    assert!(safety.is_none());
+}
+
 #[test]
 fn an_out_of_band_response_reports_inconclusive_response_location() {
     let (outcome, _backend, write_gain_count, _directions) = run_confirmation(

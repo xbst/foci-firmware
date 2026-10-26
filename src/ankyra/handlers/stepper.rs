@@ -359,6 +359,7 @@ mod tests {
         notification_result: Result<(), ()>,
         notification_calls: usize,
         homing_state_at_notification: Option<u8>,
+        trigger_result: Result<u8, ()>,
     }
 
     impl MockCtx {
@@ -373,6 +374,7 @@ mod tests {
                 notification_result: Ok(()),
                 notification_calls: 0,
                 homing_state_at_notification: None,
+                trigger_result: Ok(1),
             }
         }
     }
@@ -427,7 +429,7 @@ mod tests {
         }
 
         fn trsync_trigger(&mut self, _oid: u8, _reason: u8) -> Result<u8, ()> {
-            panic!("trsync_trigger not used in this test")
+            self.trigger_result
         }
 
         fn register_endstop(&mut self, _oid: u8) -> Result<usize, ()> {
@@ -750,6 +752,49 @@ mod tests {
         assert_eq!(ctx.homing_state_at_notification, Some(1));
         assert_eq!(ctx.notification_calls, 1);
         assert_eq!(ctx.last_shutdown, None);
+        HOMING_STATE.store(0, Relaxed);
+    }
+
+    struct TrsyncSender {
+        replies: std::vec::Vec<(u8, u8, u8)>,
+    }
+
+    impl ::ankyra::SendReply<crate::ankyra::replies::TrsyncState> for TrsyncSender {
+        fn send(&mut self, payload: crate::ankyra::replies::TrsyncState) {
+            self.replies
+                .push((payload.oid, payload.can_trigger, payload.trigger_reason));
+        }
+    }
+
+    #[test]
+    fn trsync_trigger_ends_a_move_whose_preparation_has_not_finished() {
+        use crate::ankyra::handlers::trsync::trsync_trigger;
+        use crate::state::trsync::HOMING_TRIGGERED;
+
+        let _guard = crate::commission_dispatch::test_support::SHARED_STATE_MUTEX.blocking_lock();
+        // An endstop that is already pressed fires within milliseconds of the
+        // start clock, often before the maintenance tick has advanced state 1 to
+        // 2; the host then ends the move while preparation is still pending.
+        for (initial, expected) in [(1u8, 3u8), (2, 3), (3, 3), (0, 0)] {
+            HOMING_STATE.store(initial, Relaxed);
+            HOMING_TRIGGERED.store(5, Relaxed);
+            let mut ctx = MockCtx::new();
+            ctx.trigger_result = Ok(2);
+            let mut sender = TrsyncSender {
+                replies: std::vec::Vec::new(),
+            };
+
+            trsync_trigger(&mut ctx, &mut sender, 5, 2);
+
+            assert_eq!(
+                HOMING_STATE.load(Relaxed),
+                expected,
+                "homing state {initial} after the host ended the move"
+            );
+            assert_eq!(HOMING_TRIGGERED.load(Relaxed), 0xFF);
+            assert_eq!(sender.replies, std::vec![(5, 0, 2)]);
+            assert_eq!(ctx.last_shutdown, None);
+        }
         HOMING_STATE.store(0, Relaxed);
     }
 

@@ -1473,9 +1473,18 @@ impl TmcControlRuntime {
             return;
         }
 
+        // `snapshot` was taken when the maintenance group opened. The host's
+        // `trsync_trigger` can end the homing move in the meantime and move the
+        // state to 3 on its own, so only advance from the state the snapshot
+        // described; a blind store would drag a finished move back to 2 and
+        // strand it there with its trigger already cleared.
         match snapshot {
-            1 => homing.state.store(2, Relaxed),
-            2 if homing.triggered.load(Relaxed) != 0xFF => homing.state.store(3, Relaxed),
+            1 => {
+                let _ = homing.state.compare_exchange(1, 2, Relaxed, Relaxed);
+            }
+            2 if homing.triggered.load(Relaxed) != 0xFF => {
+                let _ = homing.state.compare_exchange(2, 3, Relaxed, Relaxed);
+            }
             3 => Self::leave_restore_pending(&homing),
             _ => {}
         }

@@ -60,7 +60,18 @@ pub fn trsync_trigger(ctx: &mut dyn TrsyncLifecycleHost, oid: u8, reason: u8) {
         Ok(trigger_reason) => {
             use core::sync::atomic::Ordering::Relaxed;
             HOMING_TRIGGERED.store(0xFF, Relaxed);
-            let _ = HOMING_STATE.compare_exchange(2, 3, Relaxed, Relaxed);
+            // The host ends every homing move with this command. The move is
+            // over whether preparation (state 1) finished or not, so hand both
+            // the armed state and a still-preparing state to the restore step;
+            // leaving state 1 to advance to 2 afterwards would strand the state
+            // machine in 2 with its trigger already cleared, and the next homing
+            // would park its steps until the segment queue overflowed.
+            if HOMING_STATE
+                .compare_exchange(2, 3, Relaxed, Relaxed)
+                .is_err()
+            {
+                let _ = HOMING_STATE.compare_exchange(1, 3, Relaxed, Relaxed);
+            }
             ::ankyra::klipper_reply!(
                 crate::ankyra::replies::TrsyncState,
                 oid: u8 = oid,

@@ -2101,6 +2101,29 @@ fn advance_homing_state_after_channels_waits_for_all_channels() {
 }
 
 #[test]
+fn advance_homing_state_does_not_regress_a_move_the_host_already_ended() {
+    // The group opened while state 1 was preparing; before it finalized, the
+    // endstop fired and the host's trsync_trigger handed the move to restore.
+    let homing_state = core::sync::atomic::AtomicU8::new(3);
+    let homing_triggered = core::sync::atomic::AtomicU8::new(0xFF);
+    let homing_reenter = core::sync::atomic::AtomicBool::new(false);
+
+    let homing = TmcControlHomingRefs::new(&homing_state, &homing_triggered, &homing_reenter);
+    TmcControlRuntime::advance_homing_state_after_channels(homing, 1, true);
+    assert_eq!(
+        homing_state.load(Relaxed),
+        3,
+        "a stale state-1 snapshot must not pull a finished move back to 2"
+    );
+
+    // Same for a stale state-2 snapshot whose trigger latch is still set.
+    homing_triggered.store(5, Relaxed);
+    let homing = TmcControlHomingRefs::new(&homing_state, &homing_triggered, &homing_reenter);
+    TmcControlRuntime::advance_homing_state_after_channels(homing, 2, true);
+    assert_eq!(homing_state.load(Relaxed), 3);
+}
+
+#[test]
 fn advance_homing_state_re_enters_preparation_after_a_restore_with_a_queued_pass() {
     let homing_state = core::sync::atomic::AtomicU8::new(3);
     let homing_triggered = core::sync::atomic::AtomicU8::new(0xFF);

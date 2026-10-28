@@ -433,7 +433,7 @@ impl OuterSafetyLimits {
     ) -> Result<(), CommissionError> {
         let envelope_mrev_s =
             Self::envelope_mrev_s(planned_velocity_mrev_s)?.max(effective_ceiling_mrev_s);
-        self.apply_velocity_envelope(envelope_mrev_s, envelope_mrev_s);
+        self.apply_velocity_envelope(planned_velocity_mrev_s, envelope_mrev_s, envelope_mrev_s);
         Ok(())
     }
 
@@ -2131,9 +2131,15 @@ mod tests {
             .expect("a ceiling above the proportional envelope is accepted");
         // 12_500 mrev/s at 4_000 counts/rev is 50_000_000 milli-counts/s, for the
         // stroke and for its zero-target settle alike.
-        assert_eq!(safety.active_velocity_cap_milli_counts_per_s(), 50_000_000);
+        assert_eq!(
+            safety.active_velocity_cap_milli_counts_per_s(100_000),
+            50_000_000
+        );
         safety.enter_settle_phase();
-        assert_eq!(safety.active_velocity_cap_milli_counts_per_s(), 50_000_000);
+        assert_eq!(
+            safety.active_velocity_cap_milli_counts_per_s(100_000),
+            50_000_000
+        );
     }
 
     #[test]
@@ -2145,14 +2151,14 @@ mod tests {
             .configure_velocity_envelope_up_to_ceiling(5_366, 0)
             .expect("a zero ceiling keeps the proportional envelope");
         assert_eq!(
-            safety.active_velocity_cap_milli_counts_per_s(),
+            safety.active_velocity_cap_milli_counts_per_s(100_000),
             proportional_envelope_milli_counts_per_s
         );
         safety
             .configure_velocity_envelope_up_to_ceiling(5_366, 8_000)
             .expect("a ceiling below the proportional envelope keeps it");
         assert_eq!(
-            safety.active_velocity_cap_milli_counts_per_s(),
+            safety.active_velocity_cap_milli_counts_per_s(100_000),
             proportional_envelope_milli_counts_per_s
         );
     }

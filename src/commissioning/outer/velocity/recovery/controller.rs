@@ -290,7 +290,7 @@ pub(crate) async fn step_rung_origin_recovery<B: CommissioningBackend>(
                     Err(error) => return current_guard_fault(runtime, resources, backend, error),
                 };
                 if (limiter_contact || recovery_current_contact(resources.current_observer))
-                    &&!runtime.current_contact_detected()
+                    && !runtime.current_contact_detected()
                 {
                     return recovery_current_headroom(runtime, resources, backend).await;
                 }

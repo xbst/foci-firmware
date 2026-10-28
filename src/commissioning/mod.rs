@@ -2205,7 +2205,10 @@ mod tests {
         // The gate is bounded by the effective ceiling instead: the 10_000 mrev/s
         // machine ceiling of `sample_outer_params`, below the 12_487 mrev/s a
         // 4_000-count encoder can observe, i.e. 40_000_000 milli-counts/s.
-        assert_eq!(safety.active_velocity_cap_milli_counts_per_s(), 40_000_000);
+        assert_eq!(
+            safety.active_velocity_cap_milli_counts_per_s(100_000),
+            40_000_000
+        );
     }
 
     #[fixture_test]

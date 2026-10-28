@@ -1963,7 +1963,10 @@ fn setup_arms_the_safety_envelope_at_the_effective_ceiling() {
     // sweep is fenced by the budget's 10_000 mrev/s machine ceiling instead
     // (below the 12_487 mrev/s a 4_000-count encoder can observe), i.e.
     // 40_000_000 milli-counts/s.
-    assert_eq!(safety.active_velocity_cap_milli_counts_per_s(), 40_000_000);
+    assert_eq!(
+        safety.active_velocity_cap_milli_counts_per_s(100_000),
+        40_000_000
+    );
 }
 
 #[test]

@@ -2244,6 +2244,7 @@ fn run_confirmation_with_boundary_status(
         target_velocity_rpm,
         4_394,
         u16::MAX,
+        0,
     );
     let mut session = match entry {
         BandConfirmationEntry::Ready(session) => session,
